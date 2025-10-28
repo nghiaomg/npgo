@@ -134,17 +134,17 @@ func CacheInfo(cachePath, extractPath string) {
 func InstallSummary(packages []string, totalTime string) {
 	fmt.Println()
 
-	Info.Println("╔══════════════════════════════════════════════════════════════╗")
-	Info.Println("║                                                              ║")
-	Info.Println("║                📊 INSTALLATION SUMMARY                      ║")
-	Info.Println("║                                                              ║")
-	Info.Printf("║    📦 Packages installed: %d                                 ║\n", len(packages))
-	Info.Printf("║    ⏱️  Total time: %s                                        ║\n", totalTime)
-	Info.Println("║    💾 Cache location: ~/.npgo/                              ║")
-	Info.Println("║                                                              ║")
+	Info.Printf("╔════════════════════════════════════════════════════════════╗\n")
+	Info.Printf("║                                                            ║\n")
+	Info.Printf("║                📊 INSTALLATION SUMMARY                    ║\n")
+	Info.Printf("║                                                            ║\n")
+	Info.Printf("║    📦 Packages installed: %d                              ║\n", len(packages))
+	Info.Printf("║    ⏱️  Total time: %s                                     ║\n", totalTime)
+	Info.Printf("║    💾 Cache location: ~/.npgo/                            ║\n")
+	Info.Printf("║                                                            ║\n")
 	Info.Printf("║    %s                                                      ║\n", Success.Sprint("All packages ready! 🚀"))
-	Info.Println("║                                                              ║")
-	Info.Println("╚══════════════════════════════════════════════════════════════╝")
+	Info.Printf("║                                                            ║\n")
+	Info.Printf("╚════════════════════════════════════════════════════════════╝\n")
 	fmt.Println()
 }
 
