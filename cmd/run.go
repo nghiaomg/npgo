@@ -47,14 +47,44 @@ func runScript(script string) {
 
 	var execCmd *exec.Cmd
 	if runtime.GOOS == "windows" {
+		// Prepend global node_modules to NODE_PATH for resolution
+		// so node -r <module> can find global linked packages
+		globalNM := os.ExpandEnv("%USERPROFILE%\\.npgo\\node_modules")
+		env := os.Environ()
+		hasNodePath := false
+		for i, e := range env {
+			if strings.HasPrefix(e, "NODE_PATH=") {
+				env[i] = e + ";" + globalNM
+				hasNodePath = true
+				break
+			}
+		}
+		if !hasNodePath {
+			env = append(env, "NODE_PATH="+globalNM)
+		}
 		execCmd = exec.Command("cmd", "/C", cmdStr)
+		execCmd.Env = env
 	} else {
+		// POSIX
+		globalNM := os.ExpandEnv("$HOME/.npgo/node_modules")
+		env := os.Environ()
+		hasNodePath := false
+		for i, e := range env {
+			if strings.HasPrefix(e, "NODE_PATH=") {
+				env[i] = e + ":" + globalNM
+				hasNodePath = true
+				break
+			}
+		}
+		if !hasNodePath {
+			env = append(env, "NODE_PATH="+globalNM)
+		}
 		execCmd = exec.Command("bash", "-c", cmdStr)
+		execCmd.Env = env
 	}
 	execCmd.Stdout = os.Stdout
 	execCmd.Stderr = os.Stderr
 	execCmd.Stdin = os.Stdin
-	execCmd.Env = os.Environ()
 
 	if err := execCmd.Run(); err != nil {
 		ui.ErrorMessage(fmt.Errorf("Script \"%s\" failed: %v", script, err))
