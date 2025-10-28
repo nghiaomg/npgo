@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"npgo/internal/ui"
+	"npgo/internal/updater"
 
 	"github.com/spf13/cobra"
 )
@@ -29,6 +30,7 @@ Features:
 		fmt.Println("  npgo fetch <package>@<version>  - Fetch a package")
 		fmt.Println("  npgo install <package>         - Install a package")
 		fmt.Println("  npgo run <script>              - Run a package.json script")
+		fmt.Println("  npgo update                    - Update npgo to latest version")
 		fmt.Println("  npgo --help                     - Show help")
 		fmt.Println()
 	},
@@ -46,4 +48,12 @@ func init() {
 	// Add global flags here if needed
 	rootCmd.PersistentFlags().BoolP("verbose", "v", false, "verbose output")
 	rootCmd.PersistentFlags().BoolP("quiet", "q", false, "quiet output")
+
+	// Best-effort update check notice (non-blocking)
+	go func() {
+		latest, hasNew, err := updater.CheckUpdate(currentVersion)
+		if err == nil && hasNew {
+			ui.Warning.Println("⚠️  A new version is available:", latest, "→ run 'npgo update'")
+		}
+	}()
 }
