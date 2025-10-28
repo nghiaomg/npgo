@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync"
 
 	"npgo/internal/cache"
 	"npgo/internal/extractor"
@@ -30,10 +31,11 @@ func NewInstaller(nodeModulesPath string) *Installer {
 func (i *Installer) InstallPackage(name, version string) (string, error) {
 	resolvedVersion := version
 
-	// Check if already installed
+	// Check if already installed (idempotent: do not treat as error)
 	installedPath := filepath.Join(i.nodeModulesPath, name)
 	if _, err := os.Stat(installedPath); err == nil {
-		return "", fmt.Errorf("package %s is already installed", name)
+		// Return given version to keep caller UI stable
+		return version, nil
 	}
 
 	// Ensure node_modules exists
@@ -57,15 +59,14 @@ func (i *Installer) InstallPackage(name, version string) (string, error) {
 		// Check cache again with resolved version
 		cachePath = cache.GetCachePath(name, resolvedVersion)
 		if !cache.Exists(cachePath) {
-			// Download tarball
-			tarballPath, err := registry.DownloadTarball(metadata.TarballURL, name, metadata.Version)
+			// Streaming download and extract
+			body, err := registry.StreamTarball(metadata.TarballURL)
 			if err != nil {
-				return "", fmt.Errorf("failed to download tarball: %w", err)
+				return "", fmt.Errorf("failed to stream tarball: %w", err)
 			}
-
-			// Extract
+			defer body.Close()
 			extractPath := cache.GetExtractPath(name, metadata.Version)
-			if err := extractor.ExtractTarGz(tarballPath, extractPath); err != nil {
+			if err := extractor.ExtractFromReader(body, extractPath); err != nil {
 				return "", fmt.Errorf("failed to extract: %w", err)
 			}
 		}
@@ -208,9 +209,39 @@ func copyFile(src, dst string) error {
 
 // InstallAll installs all dependencies
 func (i *Installer) InstallAll(packages map[string]string) error {
+	// parallel install with worker pool
+	type job struct{ name, version string }
+	jobs := make(chan job, len(packages))
+	errs := make(chan error, len(packages))
+
+	const maxWorkers = 16
+	var wg sync.WaitGroup
+	worker := func() {
+		defer wg.Done()
+		for j := range jobs {
+			if _, err := i.InstallPackage(j.name, j.version); err != nil {
+				errs <- fmt.Errorf("failed to install %s: %w", j.name, err)
+			} else {
+				errs <- nil
+			}
+		}
+	}
+
+	for w := 0; w < maxWorkers; w++ {
+		wg.Add(1)
+		go worker()
+	}
+
 	for name, version := range packages {
-		if _, err := i.InstallPackage(name, version); err != nil {
-			return fmt.Errorf("failed to install %s: %w", name, err)
+		jobs <- job{name: name, version: version}
+	}
+	close(jobs)
+
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			return err
 		}
 	}
 	return nil

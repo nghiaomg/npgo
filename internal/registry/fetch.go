@@ -7,7 +7,18 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 )
+
+// HTTPClient is a shared HTTP client with keep-alive pooling
+var HTTPClient = &http.Client{
+	Transport: &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100,
+		IdleConnTimeout:     90 * time.Second,
+	},
+	Timeout: 0,
+}
 
 // PackageMetadata represents the metadata structure from npm registry
 type PackageMetadata struct {
@@ -32,7 +43,12 @@ type RegistryResponse struct {
 func FetchMetadata(pkgName, version string) (*PackageMetadata, error) {
 	url := fmt.Sprintf("https://registry.npmjs.org/%s", pkgName)
 
-	resp, err := http.Get(url)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := HTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch registry data: %w", err)
 	}
@@ -89,7 +105,12 @@ func FetchMetadata(pkgName, version string) (*PackageMetadata, error) {
 
 // DownloadTarball downloads the package tarball to cache directory
 func DownloadTarball(tarballURL, pkgName, version string) (string, error) {
-	resp, err := http.Get(tarballURL)
+	req, err := http.NewRequest(http.MethodGet, tarballURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := HTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to download tarball: %w", err)
 	}
@@ -123,6 +144,24 @@ func DownloadTarball(tarballURL, pkgName, version string) (string, error) {
 	}
 
 	return filepath, nil
+}
+
+// StreamTarball returns a streaming reader for the tarball
+func StreamTarball(tarballURL string) (io.ReadCloser, error) {
+	req, err := http.NewRequest(http.MethodGet, tarballURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := HTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download tarball: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		defer resp.Body.Close()
+		return nil, fmt.Errorf("download failed with status %d", resp.StatusCode)
+	}
+	return resp.Body, nil
 }
 
 func getCacheDir() string {
