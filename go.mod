@@ -1,12 +1,15 @@
 module npgo
 
-go 1.21
+go 1.24.0
+
+toolchain go1.24.4
 
 require (
 	github.com/briandowns/spinner v1.23.0
 	github.com/fatih/color v1.16.0
 	github.com/schollz/progressbar/v3 v3.14.2
 	github.com/spf13/cobra v1.8.0
+	golang.org/x/exp v0.0.0-20251023183803-a4bb9ffd2546
 )
 
 require (

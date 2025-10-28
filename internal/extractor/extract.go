@@ -8,11 +8,36 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	mmap "golang.org/x/exp/mmap"
 )
 
 // ExtractTarGz extracts a .tgz file to the destination directory
 func ExtractTarGz(src, dest string) error {
-	// Open the source file
+	// Try mmap for faster read
+	mm, err := mmap.Open(src)
+	if err == nil {
+		defer mm.Close()
+		// mmap.ReaderAt implements ReadAt; wrap into io.Reader via NewSectionReader
+		reader := io.NewSectionReader(mm, 0, int64(mm.Len()))
+		// Attempt gzip reader
+		if gz, gzErr := gzip.NewReader(reader); gzErr == nil {
+			defer gz.Close()
+			tr := tar.NewReader(gz)
+			if err := extractTarReader(tr, dest); err != nil {
+				return err
+			}
+			return nil
+		}
+		// Fallback: plain tar
+		tr := tar.NewReader(reader)
+		if err := extractTarReader(tr, dest); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	// Fallback to regular file IO
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("failed to open source file: %w", err)
@@ -28,63 +53,7 @@ func ExtractTarGz(src, dest string) error {
 
 	// Create tar reader
 	tarReader := tar.NewReader(gzReader)
-
-	// Ensure destination directory exists
-	if err := os.MkdirAll(dest, 0755); err != nil {
-		return fmt.Errorf("failed to create destination directory: %w", err)
-	}
-
-	// Extract files
-	for {
-		header, err := tarReader.Next()
-		if err == io.EOF {
-			break // End of archive
-		}
-		if err != nil {
-			return fmt.Errorf("failed to read tar header: %w", err)
-		}
-
-		// Skip if it's not a regular file
-		if header.Typeflag != tar.TypeReg {
-			continue
-		}
-
-		// Clean the path and remove leading directory components
-		// npm packages typically have a package/ prefix
-		cleanPath := cleanTarPath(header.Name)
-		if cleanPath == "" {
-			continue // Skip empty paths
-		}
-
-		// Create full destination path
-		fullPath := filepath.Join(dest, cleanPath)
-
-		// Ensure parent directory exists
-		parentDir := filepath.Dir(fullPath)
-		if err := os.MkdirAll(parentDir, 0755); err != nil {
-			return fmt.Errorf("failed to create parent directory: %w", err)
-		}
-
-		// Create the file
-		destFile, err := os.Create(fullPath)
-		if err != nil {
-			return fmt.Errorf("failed to create destination file: %w", err)
-		}
-
-		// Copy file contents
-		_, err = io.Copy(destFile, tarReader)
-		destFile.Close()
-		if err != nil {
-			return fmt.Errorf("failed to copy file contents: %w", err)
-		}
-
-		// Set file permissions
-		if err := os.Chmod(fullPath, os.FileMode(header.Mode)); err != nil {
-			return fmt.Errorf("failed to set file permissions: %w", err)
-		}
-	}
-
-	return nil
+	return extractTarReader(tarReader, dest)
 }
 
 // ExtractFromReader streams extract from an io.Reader (HTTP body)
@@ -105,6 +74,19 @@ func ExtractFromReader(r io.Reader, dest string) error {
 		return fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
+	return extractTarReader(tr, dest)
+}
+
+// noCloseReader prevents closing the underlying reader (HTTP Body handled elsewhere)
+type noCloseReader struct{ io.Reader }
+
+func (noCloseReader) Close() error { return nil }
+
+// extractTarReader extracts files from a tar reader to dest
+func extractTarReader(tr *tar.Reader, dest string) error {
+	if err := os.MkdirAll(dest, 0755); err != nil {
+		return fmt.Errorf("failed to create destination directory: %w", err)
+	}
 	for {
 		header, err := tr.Next()
 		if err == io.EOF {
@@ -113,10 +95,8 @@ func ExtractFromReader(r io.Reader, dest string) error {
 		if err != nil {
 			return fmt.Errorf("failed to read tar header: %w", err)
 		}
-
 		switch header.Typeflag {
 		case tar.TypeDir:
-			// ensure dir
 			cleanPath := cleanTarPath(header.Name)
 			if cleanPath == "" {
 				continue
@@ -147,16 +127,11 @@ func ExtractFromReader(r io.Reader, dest string) error {
 				return fmt.Errorf("failed to chmod: %w", err)
 			}
 		default:
-			// skip others
+			// skip
 		}
 	}
 	return nil
 }
-
-// noCloseReader prevents closing the underlying reader (HTTP Body handled elsewhere)
-type noCloseReader struct{ io.Reader }
-
-func (noCloseReader) Close() error { return nil }
 
 // cleanTarPath removes the package prefix from tar paths
 // npm packages typically have structure like: package/package.json, package/lib/index.js
