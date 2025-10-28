@@ -26,10 +26,22 @@ Features:
 		ui.Logo()
 		ui.Welcome()
 
+		// Shorthand: npgo <script> == npgo run <script>
+		if len(args) > 0 {
+			known := map[string]struct{}{
+				"fetch": {}, "install": {}, "i": {}, "run": {}, "update": {}, "help": {}, "--help": {}, "-h": {},
+			}
+			if _, ok := known[args[0]]; !ok {
+				// treat as script name
+				runScript(args[0])
+				return
+			}
+		}
+
 		fmt.Println("Available commands:")
 		fmt.Println("  npgo fetch <package>@<version>  - Fetch a package")
 		fmt.Println("  npgo install <package>         - Install a package")
-		fmt.Println("  npgo run <script>              - Run a package.json script")
+		fmt.Println("  npgo run <script>              - Run a package.json script (or 'npgo <script>')")
 		fmt.Println("  npgo update                    - Update npgo to latest version")
 		fmt.Println("  npgo --help                     - Show help")
 		fmt.Println()

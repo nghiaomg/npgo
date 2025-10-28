@@ -124,6 +124,11 @@ func (i *Installer) InstallPackage(name, version string) (string, error) {
 		return "", fmt.Errorf("failed to create symlink: %w", err)
 	}
 
+	// Create/update global node_modules link for cross-project resolution
+	if err := ensureGlobalPackageLink(name, extractPath); err != nil {
+		// non-fatal
+	}
+
 	// Write per-package integrity file
 	_ = writeIntegrity(installedPath, name, resolvedVersion, "")
 
@@ -160,6 +165,39 @@ func createTreeLinkOrCopy(src, dst string) error {
 				return err
 			}
 		}
+	}
+	return nil
+}
+
+// Global node_modules helpers
+func globalNodeModulesPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(".npgo", "node_modules")
+	}
+	return filepath.Join(home, ".npgo", "node_modules")
+}
+
+func ensureGlobalPackageLink(name, target string) error {
+	base := globalNodeModulesPath()
+	if err := os.MkdirAll(base, 0755); err != nil {
+		return err
+	}
+	link := filepath.Join(base, name)
+	// remove existing
+	if _, err := os.Lstat(link); err == nil {
+		_ = os.RemoveAll(link)
+	}
+	// create symlink/junction
+	if runtime.GOOS == "windows" {
+		if err := createJunctionWindows(link, target); err == nil {
+			return nil
+		}
+		// fallback hardlink tree
+		return createTreeLinkOrCopy(target, link)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		return createTreeLinkOrCopy(target, link)
 	}
 	return nil
 }
