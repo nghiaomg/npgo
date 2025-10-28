@@ -8,11 +8,36 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	mmap "golang.org/x/exp/mmap"
 )
 
 // ExtractTarGz extracts a .tgz file to the destination directory
 func ExtractTarGz(src, dest string) error {
-	// Open the source file
+	// Try mmap for faster read
+	mm, err := mmap.Open(src)
+	if err == nil {
+		defer mm.Close()
+		// mmap.ReaderAt implements ReadAt; wrap into io.Reader via NewSectionReader
+		reader := io.NewSectionReader(mm, 0, int64(mm.Len()))
+		// Attempt gzip reader
+		if gz, gzErr := gzip.NewReader(reader); gzErr == nil {
+			defer gz.Close()
+			tr := tar.NewReader(gz)
+			if err := extractTarReader(tr, dest); err != nil {
+				return err
+			}
+			return nil
+		}
+		// Fallback: plain tar
+		tr := tar.NewReader(reader)
+		if err := extractTarReader(tr, dest); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	// Fallback to regular file IO
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("failed to open source file: %w", err)
@@ -28,62 +53,83 @@ func ExtractTarGz(src, dest string) error {
 
 	// Create tar reader
 	tarReader := tar.NewReader(gzReader)
+	return extractTarReader(tarReader, dest)
+}
 
-	// Ensure destination directory exists
+// ExtractFromReader streams extract from an io.Reader (HTTP body)
+func ExtractFromReader(r io.Reader, dest string) error {
+	// Support gzip if Content-Encoding is gzip or data is gzip
+	var tr *tar.Reader
+
+	// Try to detect gzip by peeking via http or assume gzip
+	// We will attempt gzip first; if fails, treat as plain tar
+	if gz, err := gzip.NewReader(noCloseReader{r}); err == nil {
+		defer gz.Close()
+		tr = tar.NewReader(gz)
+	} else {
+		tr = tar.NewReader(r)
+	}
+
 	if err := os.MkdirAll(dest, 0755); err != nil {
 		return fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
-	// Extract files
+	return extractTarReader(tr, dest)
+}
+
+// noCloseReader prevents closing the underlying reader (HTTP Body handled elsewhere)
+type noCloseReader struct{ io.Reader }
+
+func (noCloseReader) Close() error { return nil }
+
+// extractTarReader extracts files from a tar reader to dest
+func extractTarReader(tr *tar.Reader, dest string) error {
+	if err := os.MkdirAll(dest, 0755); err != nil {
+		return fmt.Errorf("failed to create destination directory: %w", err)
+	}
 	for {
-		header, err := tarReader.Next()
+		header, err := tr.Next()
 		if err == io.EOF {
-			break // End of archive
+			break
 		}
 		if err != nil {
 			return fmt.Errorf("failed to read tar header: %w", err)
 		}
-
-		// Skip if it's not a regular file
-		if header.Typeflag != tar.TypeReg {
-			continue
-		}
-
-		// Clean the path and remove leading directory components
-		// npm packages typically have a package/ prefix
-		cleanPath := cleanTarPath(header.Name)
-		if cleanPath == "" {
-			continue // Skip empty paths
-		}
-
-		// Create full destination path
-		fullPath := filepath.Join(dest, cleanPath)
-
-		// Ensure parent directory exists
-		parentDir := filepath.Dir(fullPath)
-		if err := os.MkdirAll(parentDir, 0755); err != nil {
-			return fmt.Errorf("failed to create parent directory: %w", err)
-		}
-
-		// Create the file
-		destFile, err := os.Create(fullPath)
-		if err != nil {
-			return fmt.Errorf("failed to create destination file: %w", err)
-		}
-
-		// Copy file contents
-		_, err = io.Copy(destFile, tarReader)
-		destFile.Close()
-		if err != nil {
-			return fmt.Errorf("failed to copy file contents: %w", err)
-		}
-
-		// Set file permissions
-		if err := os.Chmod(fullPath, os.FileMode(header.Mode)); err != nil {
-			return fmt.Errorf("failed to set file permissions: %w", err)
+		switch header.Typeflag {
+		case tar.TypeDir:
+			cleanPath := cleanTarPath(header.Name)
+			if cleanPath == "" {
+				continue
+			}
+			fullPath := filepath.Join(dest, cleanPath)
+			if err := os.MkdirAll(fullPath, 0755); err != nil {
+				return fmt.Errorf("failed to create dir: %w", err)
+			}
+		case tar.TypeReg:
+			cleanPath := cleanTarPath(header.Name)
+			if cleanPath == "" {
+				continue
+			}
+			fullPath := filepath.Join(dest, cleanPath)
+			if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+				return fmt.Errorf("failed to create parent dir: %w", err)
+			}
+			f, err := os.Create(fullPath)
+			if err != nil {
+				return fmt.Errorf("failed to create file: %w", err)
+			}
+			if _, err := io.Copy(f, tr); err != nil {
+				f.Close()
+				return fmt.Errorf("failed to copy file: %w", err)
+			}
+			f.Close()
+			if err := os.Chmod(fullPath, os.FileMode(header.Mode)); err != nil {
+				return fmt.Errorf("failed to chmod: %w", err)
+			}
+		default:
+			// skip
 		}
 	}
-
 	return nil
 }
 

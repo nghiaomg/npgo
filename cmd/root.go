@@ -28,6 +28,7 @@ Features:
 		fmt.Println("Available commands:")
 		fmt.Println("  npgo fetch <package>@<version>  - Fetch a package")
 		fmt.Println("  npgo install <package>         - Install a package")
+		fmt.Println("  npgo run <script>              - Run a package.json script")
 		fmt.Println("  npgo --help                     - Show help")
 		fmt.Println()
 	},

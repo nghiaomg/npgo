@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"npgo/internal/installer"
+	"npgo/internal/lockfile"
 	"npgo/internal/packagejson"
 	"npgo/internal/resolver"
 	"npgo/internal/ui"
@@ -44,6 +45,11 @@ var devFlag bool
 func init() {
 	installCmd.Flags().BoolVarP(&devFlag, "dev", "D", false, "Install as dev dependency")
 	rootCmd.AddCommand(installCmd)
+
+	// NOTE: cobra does not support a global interceptor out-of-the-box.
+	// Mapping of npgo <script> to npgo run <script> is handled by
+	// encouraging usage of `npgo run <script>`. Future improvement: custom
+	// PreRun hook at root to transform args.
 }
 
 // installSinglePackage installs a single package
@@ -125,6 +131,11 @@ func installFromPackageJSON() {
 	spinner.Start()
 
 	// Resolve dependencies
+	if devFlag {
+		ui.InstallStep("🛠️", "--dev enabled: verbose debug logs active")
+		ui.InstallStep("🧩", fmt.Sprintf("Dependencies: %d, DevDependencies: %d", len(pkg.Dependencies), len(pkg.DevDependencies)))
+	}
+
 	deps, err := resolver.ResolveDependencies(pkg)
 	if err != nil {
 		spinner.Stop()
@@ -145,6 +156,12 @@ func installFromPackageJSON() {
 
 	spinner.Stop()
 	ui.InstallStep("✅", fmt.Sprintf("Resolved %d dependencies", len(deps)))
+	if devFlag {
+		ui.InstallStep("🔎", "Resolved packages:")
+		for _, d := range deps {
+			ui.Muted.Printf("   - %s@%s (spec: %s)\n", d.Name, d.Resolved, d.Spec)
+		}
+	}
 
 	// Create installer
 	inst := installer.NewInstaller("./node_modules")
@@ -155,6 +172,9 @@ func installFromPackageJSON() {
 
 	for i, dep := range deps {
 		instSpinner.Suffix = ui.Accent.Sprintf(" Installing %s...", dep.Name)
+		if devFlag {
+			ui.InstallStep("➡️", fmt.Sprintf("Installing %s@%s", dep.Name, dep.Resolved))
+		}
 		if _, err := inst.InstallPackage(dep.Name, dep.Resolved); err != nil {
 			instSpinner.Stop()
 			ui.ErrorMessage(fmt.Errorf("failed to install %s: %w", dep.Name, err))
@@ -168,6 +188,15 @@ func installFromPackageJSON() {
 
 	instSpinner.Stop()
 	ui.InstallStep("✅", "All packages installed")
+
+	// Write lockfile
+	var pkgs []lockfile.PackageEntry
+	for _, d := range deps {
+		pkgs = append(pkgs, lockfile.PackageEntry{
+			Name: d.Name, Version: d.Resolved, Resolved: d.TarballURL, Integrity: "sha256", // TODO compute
+		})
+	}
+	_ = lockfile.Save(".", &lockfile.LockFile{LockfileVersion: 1, Packages: pkgs})
 
 	// Show summary
 	duration := time.Since(startTime)
