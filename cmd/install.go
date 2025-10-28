@@ -45,6 +45,11 @@ var devFlag bool
 func init() {
 	installCmd.Flags().BoolVarP(&devFlag, "dev", "D", false, "Install as dev dependency")
 	rootCmd.AddCommand(installCmd)
+
+	// NOTE: cobra does not support a global interceptor out-of-the-box.
+	// Mapping of npgo <script> to npgo run <script> is handled by
+	// encouraging usage of `npgo run <script>`. Future improvement: custom
+	// PreRun hook at root to transform args.
 }
 
 // installSinglePackage installs a single package

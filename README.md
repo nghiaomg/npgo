@@ -53,6 +53,30 @@ go build -o npgo cmd/npgo/main.go
 
 # Enable verbose debug logs during install (show resolved list)
 ./npgo i --dev
+
+### Scripts (npm-like)
+
+Run scripts from `package.json` using `npgo run <script>`:
+
+```bash
+# package.json
+{
+  "scripts": {
+    "dev": "vite",
+    "start": "node dist/index.js",
+    "test": "vitest"
+  }
+}
+
+# Run scripts
+./npgo run dev
+./npgo run start
+./npgo run test
+```
+
+- On Windows, scripts run via `cmd /C <script>`; on macOS/Linux via `bash -c <script>`.
+- If a script is missing, npgo prints: `Script '<name>' not found in package.json`.
+- Coming soon: shorthand `npgo <script>` will auto-map to `npgo run <script>`.
 ```
 
 ### Cache & CAS Store
