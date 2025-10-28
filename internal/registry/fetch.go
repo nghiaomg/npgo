@@ -28,6 +28,7 @@ type PackageMetadata struct {
 	Dist       struct {
 		Tarball string `json:"tarball"`
 	} `json:"dist"`
+	Dependencies map[string]string `json:"dependencies"`
 }
 
 // RegistryResponse represents the response from npm registry

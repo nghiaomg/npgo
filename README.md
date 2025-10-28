@@ -72,11 +72,16 @@ Run scripts from `package.json` using `npgo run <script>`:
 ./npgo run dev
 ./npgo run start
 ./npgo run test
+
+# Short aliases
+./npgo start
+./npgo dev
+./npgo build
 ```
 
 - On Windows, scripts run via `cmd /C <script>`; on macOS/Linux via `bash -c <script>`.
 - If a script is missing, npgo prints: `Script '<name>' not found in package.json`.
-- Coming soon: shorthand `npgo <script>` will auto-map to `npgo run <script>`.
+  Shorthand `npgo <script>` is supported for common scripts (start/dev/build).
 ```
 
 ### Cache & CAS Store
@@ -170,12 +175,17 @@ chmod +x scripts/export-diagrams.sh
 - **CAS store**: deduplicate content, hardlink when possible.
 - **Windows**: prefer symlink; if lacking privilege → junction; fallback hardlink/copy.
 - **Idempotent install**: skip if `node_modules/<pkg>/.npgo-integrity.json` matches.
+- **Local Binary Linking**: create `.bin` shims from package `bin` field
+  - POSIX: symlink `node_modules/.bin/<bin>` → `node_modules/<pkg>/<relPath>`
+  - Windows: `.cmd` shim calling `node "%~dp0\..\<pkg>\<relPath>" %*`
+  - `npgo run` prepends `node_modules/.bin` to PATH automatically and adds `~/.npgo/node_modules` to `NODE_PATH` for global-linked resolution
 
 ## 🌟 Improved Features (Full)
 
 - **Parallel downloader (goroutines + worker pool)**
   - Default `maxWorkers = 16` for install; configurable in future via flag/env.
   - Cuts wall-clock time drastically on multi-core machines.
+  - DAG-based topological scheduling for dependency order.
 
 - **Streaming decompress**
   - Stream tarball directly into extractor; no intermediate `.tgz` on disk.
@@ -214,6 +224,11 @@ chmod +x scripts/export-diagrams.sh
 - `npgo install [name[@version]]`: install single or from package.json.
 - `npgo i`: alias of install.
 - `npgo i --dev`: verbose debug logs during install.
+- `npgo start|dev|build`: run scripts from package.json.
+- `npgo run <script>`: run arbitrary script from package.json.
+- `npgo update`: update npgo to latest release.
+- `npgo link`: assist linking/global resolution (npgo auto-links on install).
+- `npgo config`: show cache/CAS paths.
 
 ## 📈 Expected Impact
 

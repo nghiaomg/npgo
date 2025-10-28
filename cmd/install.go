@@ -126,7 +126,7 @@ func installFromPackageJSON() {
 	ui.InstallStep("📋", fmt.Sprintf("Found %d dependencies to install", len(pkg.GetDependencies())))
 
 	// Create resolver
-	resolver := resolver.NewResolver()
+	res := resolver.NewResolver()
 	spinner := ui.NewSpinner("Resolving dependencies...")
 	spinner.Start()
 
@@ -136,7 +136,7 @@ func installFromPackageJSON() {
 		ui.InstallStep("🧩", fmt.Sprintf("Dependencies: %d, DevDependencies: %d", len(pkg.Dependencies), len(pkg.DevDependencies)))
 	}
 
-	deps, err := resolver.ResolveDependencies(pkg)
+	deps, err := res.ResolveDependencies(pkg)
 	if err != nil {
 		spinner.Stop()
 		ui.ErrorMessage(err)
@@ -145,7 +145,7 @@ func installFromPackageJSON() {
 
 	// Resolve dev dependencies if flag is set
 	if devFlag {
-		devDeps, err := resolver.ResolveDevDependencies(pkg, true)
+		devDeps, err := res.ResolveDevDependencies(pkg, true)
 		if err != nil {
 			spinner.Stop()
 			ui.ErrorMessage(err)
@@ -154,11 +154,24 @@ func installFromPackageJSON() {
 		deps = append(deps, devDeps...)
 	}
 
+	// Build dependency graph and compute topological order
+	graph, err := res.BuildGraph(pkg.Dependencies)
+	if err != nil {
+		spinner.Stop()
+		ui.ErrorMessage(err)
+		os.Exit(1)
+	}
+	order, err := resolver.TopoOrder(graph)
+	if err != nil {
+		spinner.Stop()
+		ui.ErrorMessage(err)
+		os.Exit(1)
+	}
 	spinner.Stop()
-	ui.InstallStep("✅", fmt.Sprintf("Resolved %d dependencies", len(deps)))
+	ui.InstallStep("✅", fmt.Sprintf("Resolved %d packages (topo ordered)", len(order)))
 	if devFlag {
 		ui.InstallStep("🔎", "Resolved packages:")
-		for _, d := range deps {
+		for _, d := range order {
 			ui.Muted.Printf("   - %s@%s (spec: %s)\n", d.Name, d.Resolved, d.Spec)
 		}
 	}
@@ -170,7 +183,7 @@ func installFromPackageJSON() {
 	instSpinner := ui.NewSpinner("Installing packages...")
 	instSpinner.Start()
 
-	for i, dep := range deps {
+	for i, dep := range order {
 		instSpinner.Suffix = ui.Accent.Sprintf(" Installing %s...", dep.Name)
 		if devFlag {
 			ui.InstallStep("➡️", fmt.Sprintf("Installing %s@%s", dep.Name, dep.Resolved))
@@ -182,7 +195,7 @@ func installFromPackageJSON() {
 		}
 		// Show progress
 		if (i+1)%5 == 0 {
-			instSpinner.Suffix = ui.Accent.Sprintf(" Installed %d/%d packages", i+1, len(deps))
+			instSpinner.Suffix = ui.Accent.Sprintf(" Installed %d/%d packages", i+1, len(order))
 		}
 	}
 
@@ -191,7 +204,7 @@ func installFromPackageJSON() {
 
 	// Write lockfile
 	var pkgs []lockfile.PackageEntry
-	for _, d := range deps {
+	for _, d := range order {
 		pkgs = append(pkgs, lockfile.PackageEntry{
 			Name: d.Name, Version: d.Resolved, Resolved: d.TarballURL, Integrity: "sha256", // TODO compute
 		})
@@ -200,8 +213,8 @@ func installFromPackageJSON() {
 
 	// Show summary
 	duration := time.Since(startTime)
-	packageNames := make([]string, len(deps))
-	for i, dep := range deps {
+	packageNames := make([]string, len(order))
+	for i, dep := range order {
 		packageNames[i] = dep.Name
 	}
 	ui.InstallSummary(packageNames, duration.String())
