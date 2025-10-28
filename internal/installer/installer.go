@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -129,6 +130,9 @@ func (i *Installer) InstallPackage(name, version string) (string, error) {
 		// non-fatal
 	}
 
+	// Link CLI binaries from package.json "bin" into node_modules/.bin
+	_ = i.linkPackageBinaries(name, extractPath)
+
 	// Write per-package integrity file
 	_ = writeIntegrity(installedPath, name, resolvedVersion, "")
 
@@ -200,6 +204,72 @@ func ensureGlobalPackageLink(name, target string) error {
 		return createTreeLinkOrCopy(target, link)
 	}
 	return nil
+}
+
+// linkPackageBinaries reads package.json in extractPath and creates shims/links in <project>/node_modules/.bin
+func (i *Installer) linkPackageBinaries(pkgName, extractPath string) error {
+	pkgJSON := filepath.Join(extractPath, "package.json")
+	data, err := os.ReadFile(pkgJSON)
+	if err != nil {
+		return nil
+	}
+	// bin can be string or object
+	var raw struct {
+		Bin any `json:"bin"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+	binDir := filepath.Join(i.nodeModulesPath, ".bin")
+	if err := os.MkdirAll(binDir, 0755); err != nil {
+		return err
+	}
+
+	switch v := raw.Bin.(type) {
+	case string:
+		if v == "" {
+			return nil
+		}
+		return createBinShim(binDir, pkgName, v)
+	case map[string]any:
+		for name, p := range v {
+			rel, _ := p.(string)
+			if rel == "" {
+				continue
+			}
+			if err := createBinShim(binDir, pkgName, rel); err != nil {
+				return err
+			}
+			// Also create by actual key name if not equal to pkgName
+			if name != pkgName {
+				if err := createBinShimNamed(binDir, name, pkgName, rel); err != nil {
+					return err
+				}
+			}
+		}
+	default:
+		return nil
+	}
+	return nil
+}
+
+func createBinShim(binDir, pkgName, relPath string) error {
+	return createBinShimNamed(binDir, pkgName, pkgName, relPath)
+}
+
+func createBinShimNamed(binDir, binName, pkgName, relPath string) error {
+	targetRel := filepath.Join("..", pkgName, filepath.FromSlash(relPath))
+	linkPath := filepath.Join(binDir, binName)
+	// Remove existing
+	_ = os.Remove(linkPath)
+	_ = os.Remove(linkPath + ".cmd")
+	if runtime.GOOS == "windows" {
+		// Create .cmd shim
+		content := "@ECHO OFF\r\n" + "node \"%~dp0\\" + filepath.ToSlash(targetRel) + "\" %*\r\n"
+		return os.WriteFile(linkPath+".cmd", []byte(content), 0644)
+	}
+	// POSIX symlink
+	return os.Symlink(targetRel, linkPath)
 }
 
 // Integrity metadata helpers

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -46,6 +47,7 @@ func runScript(script string) {
 	ui.InstallStep("🚀", fmt.Sprintf("Running \"%s\" → %s", script, cmdStr))
 
 	var execCmd *exec.Cmd
+	projectBin := filepath.Join("node_modules", ".bin")
 	if runtime.GOOS == "windows" {
 		// Prepend global node_modules to NODE_PATH for resolution
 		// so node -r <module> can find global linked packages
@@ -62,6 +64,8 @@ func runScript(script string) {
 		if !hasNodePath {
 			env = append(env, "NODE_PATH="+globalNM)
 		}
+		// Prepend project .bin to PATH
+		env = append(env, fmt.Sprintf("PATH=%s;%s", projectBin, os.Getenv("PATH")))
 		execCmd = exec.Command("cmd", "/C", cmdStr)
 		execCmd.Env = env
 	} else {
@@ -79,6 +83,8 @@ func runScript(script string) {
 		if !hasNodePath {
 			env = append(env, "NODE_PATH="+globalNM)
 		}
+		// Prepend project .bin to PATH
+		env = append(env, fmt.Sprintf("PATH=%s:%s", projectBin, os.Getenv("PATH")))
 		execCmd = exec.Command("bash", "-c", cmdStr)
 		execCmd.Env = env
 	}
