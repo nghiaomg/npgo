@@ -1,6 +1,8 @@
 package installer
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,130 +18,168 @@ import (
 	"npgo/internal/cas"
 	"npgo/internal/extractor"
 	"npgo/internal/registry"
+	"npgo/internal/ui"
 )
 
-// Installer handles package installation and linking
 type Installer struct {
 	nodeModulesPath string
+	debug           bool
 }
 
-// NewInstaller creates a new installer
+// PackageSpec is a minimal spec for pipeline install
+type PackageSpec struct {
+	Name       string
+	Version    string
+	TarballURL string
+}
+
 func NewInstaller(nodeModulesPath string) *Installer {
-	return &Installer{
-		nodeModulesPath: nodeModulesPath,
-	}
+	return &Installer{nodeModulesPath: nodeModulesPath, debug: false}
 }
 
-// InstallPackage installs a single package and returns resolved version
+func NewInstallerWithDebug(nodeModulesPath string, debug bool) *Installer {
+	return &Installer{nodeModulesPath: nodeModulesPath, debug: debug}
+}
+
 func (i *Installer) InstallPackage(name, version string) (string, error) {
 	resolvedVersion := version
 
-	// Check if already installed (idempotent): if integrity matches, skip
 	installedPath := filepath.Join(i.nodeModulesPath, name)
 	if _, err := os.Stat(installedPath); err == nil {
 		if iv, _ := readIntegrity(installedPath); iv == version {
 			return version, nil
 		}
-		// If version differs, attempt relink (remove and continue)
 		_ = os.RemoveAll(installedPath)
 	}
 
-	// Ensure node_modules exists
 	if err := os.MkdirAll(i.nodeModulesPath, 0755); err != nil {
 		return "", fmt.Errorf("failed to create node_modules: %w", err)
 	}
 
-	// Check cache with original version first
 	cachePath := cache.GetCachePath(name, version)
 
-	// If not found, fetch metadata to get resolved version
 	if !cache.Exists(cachePath) {
-		// Fetch metadata
 		metadata, err := registry.FetchMetadata(name, version)
 		if err != nil {
 			return "", fmt.Errorf("failed to fetch metadata: %w", err)
 		}
 
 		resolvedVersion = metadata.Version
+		if i.debug {
+			ui.InstallStep("🔗", fmt.Sprintf("Tarball URL: %s", metadata.TarballURL))
+			ui.Muted.Printf("   Package: %s@%s (spec: %s)\n", name, resolvedVersion, version)
+		}
 
-		// Check cache again with resolved version
 		cachePath = cache.GetCachePath(name, resolvedVersion)
 		if !cache.Exists(cachePath) {
-			// Streaming download, hash, store in CAS, then extract once
-			body, err := registry.StreamTarball(metadata.TarballURL)
+			stream, err := registry.StreamTarball(metadata.TarballURL)
 			if err != nil {
 				return "", fmt.Errorf("failed to stream tarball: %w", err)
 			}
-			// Tee reader to compute hash
-			pr, pw := io.Pipe()
-			tee := io.TeeReader(body, pw)
-			// hash in background
-			var hash string
-			var hashErr error
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				hash, hashErr = cas.HashStream(tee)
-				pw.Close()
-				body.Close()
-			}()
-			// consume pipe to /dev/null
-			go func() { io.Copy(io.Discard, pr); pr.Close() }()
-			<-done
-			if hashErr != nil {
-				return "", fmt.Errorf("failed to hash tarball: %w", hashErr)
-			}
-
-			// Ensure CAS path
-			casPath, err := cas.EnsureDirs(hash)
+			defer stream.Close()
+			h := sha256.New()
+			tee := io.TeeReader(stream, h)
+			tmpDir, err := os.MkdirTemp("", "npgo-extract-*")
 			if err != nil {
 				return "", err
 			}
-			// If CAS already contains extraction, skip
-			// Otherwise, download again (stream) and extract into CAS package dir
+			tmpPkg := filepath.Join(tmpDir, "package")
+			if err := extractor.ExtractFromReader(tee, tmpPkg); err != nil {
+				os.RemoveAll(tmpDir)
+				return "", err
+			}
+			hash := hex.EncodeToString(h.Sum(nil))
+			if i.debug {
+				ui.InstallStep("🔐", fmt.Sprintf("SHA256: %s", hash))
+			}
+			casPath, err := cas.EnsureDirs(hash)
+			if err != nil {
+				os.RemoveAll(tmpDir)
+				return "", err
+			}
 			exists, _ := cas.Exists(hash)
 			if !exists {
-				body2, err := registry.StreamTarball(metadata.TarballURL)
-				if err != nil {
+				if err := os.MkdirAll(filepath.Dir(casPath), 0755); err != nil {
+					os.RemoveAll(tmpDir)
 					return "", err
 				}
-				if err := extractor.ExtractFromReader(body2, casPath); err != nil {
-					body2.Close()
-					return "", err
+				if err := os.Rename(tmpPkg, casPath); err != nil {
+					if err := createTreeLinkOrCopy(tmpPkg, casPath); err != nil {
+						os.RemoveAll(tmpDir)
+						return "", err
+					}
 				}
-				body2.Close()
 			}
-			// Link from CAS to user cache's extracted path for compatibility
+			os.RemoveAll(tmpDir)
+			_, _ = cas.EnsureExtractedCache(hash)
 			extractPath := cache.GetExtractPath(name, metadata.Version)
-			if err := createTreeLinkOrCopy(casPath, extractPath); err != nil {
+			if err := linkDirPreferSymlink(casPath, extractPath); err != nil {
 				return "", err
+			}
+			if i.debug {
+				ui.InstallStep("🔗", fmt.Sprintf("Linked extract → %s", extractPath))
+				files, dirs, samples := summarizeDir(extractPath, 15)
+				ui.Muted.Printf("   node cache view → Files: %d, Dirs: %d\n", files, dirs)
+				for _, s := range samples {
+					ui.Muted.Printf("     - %s\n", s)
+				}
 			}
 		}
 	}
 
-	// Get extract path with resolved version
 	extractPath := cache.GetExtractPath(name, resolvedVersion)
 
-	// Create symlink
 	if err := i.createSymlink(name, extractPath); err != nil {
 		return "", fmt.Errorf("failed to create symlink: %w", err)
 	}
-
-	// Create/update global node_modules link for cross-project resolution
-	if err := ensureGlobalPackageLink(name, extractPath); err != nil {
-		// non-fatal
+	if i.debug {
+		ui.InstallStep("🔗", fmt.Sprintf("node_modules/%s → %s", name, extractPath))
 	}
 
-	// Link CLI binaries from package.json "bin" into node_modules/.bin
-	_ = i.linkPackageBinaries(name, extractPath)
+	if err := ensureGlobalPackageLink(name, extractPath); err != nil {
+	}
 
-	// Write per-package integrity file
+	_ = i.linkPackageBinaries(name, extractPath)
+	if i.debug {
+		binDir := filepath.Join(i.nodeModulesPath, ".bin")
+		files, _, samples := summarizeDir(binDir, 10)
+		if files > 0 {
+			ui.InstallStep("⚙️", fmt.Sprintf("Created shims in %s", binDir))
+			for _, s := range samples {
+				ui.Muted.Printf("     - %s\n", s)
+			}
+		}
+	}
+
 	_ = writeIntegrity(installedPath, name, resolvedVersion, "")
 
 	return resolvedVersion, nil
 }
 
-// createTreeLinkOrCopy links (hardlink) a tree from src to dst; copies if link fails
+func summarizeDir(dir string, maxSamples int) (int, int, []string) {
+	var files, dirs int
+	samples := make([]string, 0, maxSamples)
+	_ = filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if p == dir {
+			return nil
+		}
+		rel, _ := filepath.Rel(dir, p)
+		if info.IsDir() {
+			dirs++
+		} else {
+			files++
+		}
+		if len(samples) < maxSamples {
+			samples = append(samples, rel)
+		}
+		return nil
+	})
+	return files, dirs, samples
+}
+
 func createTreeLinkOrCopy(src, dst string) error {
 	info, err := os.Stat(src)
 	if err != nil {
@@ -173,7 +213,6 @@ func createTreeLinkOrCopy(src, dst string) error {
 	return nil
 }
 
-// Global node_modules helpers
 func globalNodeModulesPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -188,16 +227,16 @@ func ensureGlobalPackageLink(name, target string) error {
 		return err
 	}
 	link := filepath.Join(base, name)
-	// remove existing
+	if resolved, err := filepath.EvalSymlinks(target); err == nil {
+		target = resolved
+	}
 	if _, err := os.Lstat(link); err == nil {
 		_ = os.RemoveAll(link)
 	}
-	// create symlink/junction
 	if runtime.GOOS == "windows" {
 		if err := createJunctionWindows(link, target); err == nil {
 			return nil
 		}
-		// fallback hardlink tree
 		return createTreeLinkOrCopy(target, link)
 	}
 	if err := os.Symlink(target, link); err != nil {
@@ -206,14 +245,12 @@ func ensureGlobalPackageLink(name, target string) error {
 	return nil
 }
 
-// linkPackageBinaries reads package.json in extractPath and creates shims/links in <project>/node_modules/.bin
 func (i *Installer) linkPackageBinaries(pkgName, extractPath string) error {
 	pkgJSON := filepath.Join(extractPath, "package.json")
 	data, err := os.ReadFile(pkgJSON)
 	if err != nil {
 		return nil
 	}
-	// bin can be string or object
 	var raw struct {
 		Bin any `json:"bin"`
 	}
@@ -240,7 +277,6 @@ func (i *Installer) linkPackageBinaries(pkgName, extractPath string) error {
 			if err := createBinShim(binDir, pkgName, rel); err != nil {
 				return err
 			}
-			// Also create by actual key name if not equal to pkgName
 			if name != pkgName {
 				if err := createBinShimNamed(binDir, name, pkgName, rel); err != nil {
 					return err
@@ -260,19 +296,15 @@ func createBinShim(binDir, pkgName, relPath string) error {
 func createBinShimNamed(binDir, binName, pkgName, relPath string) error {
 	targetRel := filepath.Join("..", pkgName, filepath.FromSlash(relPath))
 	linkPath := filepath.Join(binDir, binName)
-	// Remove existing
-	_ = os.Remove(linkPath)
-	_ = os.Remove(linkPath + ".cmd")
+	_ = os.RemoveAll(linkPath)
+	_ = os.RemoveAll(linkPath + ".cmd")
 	if runtime.GOOS == "windows" {
-		// Create .cmd shim
 		content := "@ECHO OFF\r\n" + "node \"%~dp0\\" + filepath.ToSlash(targetRel) + "\" %*\r\n"
 		return os.WriteFile(linkPath+".cmd", []byte(content), 0644)
 	}
-	// POSIX symlink
 	return os.Symlink(targetRel, linkPath)
 }
 
-// Integrity metadata helpers
 func integrityFile(dir string) string { return filepath.Join(dir, ".npgo-integrity.json") }
 
 func writeIntegrity(dir, name, version, hash string) error {
@@ -288,8 +320,6 @@ func readIntegrity(dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// naive parse to avoid extra dep: extract version field
-	// expect: "version": "..."
 	bs := string(b)
 	const key = "\"version\""
 	idx := strings.Index(bs, key)
@@ -309,37 +339,30 @@ func readIntegrity(dir string) (string, error) {
 	return rest[:q2], nil
 }
 
-// createSymlink creates a symbolic link from node_modules to cache
 func (i *Installer) createSymlink(name, targetPath string) error {
 	linkPath := filepath.Join(i.nodeModulesPath, name)
 
-	// Check if target exists
 	if _, err := os.Stat(targetPath); os.IsNotExist(err) {
 		return fmt.Errorf("target path does not exist: %s", targetPath)
 	}
 
-	// Remove existing link if exists
 	if _, err := os.Lstat(linkPath); err == nil {
-		if err := os.Remove(linkPath); err != nil {
+		if err := os.RemoveAll(linkPath); err != nil {
 			return fmt.Errorf("failed to remove existing link: %w", err)
 		}
 	}
 
-	// Try relative symlink first
 	relPath, err := filepath.Rel(i.nodeModulesPath, targetPath)
 	if err == nil {
 		if err := os.Symlink(relPath, linkPath); err == nil {
 			return nil
 		} else {
-			// On Windows, lack of privilege often causes EPERM
 			if runtime.GOOS == "windows" {
 				if mkErr := createJunctionWindows(linkPath, targetPath); mkErr == nil {
 					return nil
 				}
-				// Fallback: copy directory
 				return copyDir(targetPath, linkPath)
 			}
-			// Non-windows: retry absolute symlink; if fails, fallback to copy
 			if absErr := os.Symlink(targetPath, linkPath); absErr == nil {
 				return nil
 			}
@@ -347,32 +370,24 @@ func (i *Installer) createSymlink(name, targetPath string) error {
 		}
 	}
 
-	// If cannot compute relative, attempt absolute symlink
 	if err := os.Symlink(targetPath, linkPath); err == nil {
 		return nil
 	}
 
-	// Windows junction fallback
 	if runtime.GOOS == "windows" {
 		if mkErr := createJunctionWindows(linkPath, targetPath); mkErr == nil {
 			return nil
 		}
 	}
 
-	// Final fallback: copy
 	return copyDir(targetPath, linkPath)
 }
 
-// createJunctionWindows creates a directory junction using mklink /J
 func createJunctionWindows(linkPath, targetPath string) error {
-	// Ensure parent dir exists
 	if err := os.MkdirAll(filepath.Dir(linkPath), 0755); err != nil {
 		return err
 	}
-	// mklink requires cmd.exe
-	// mklink /J link target
 	cmd := exec.Command("cmd", "/c", "mklink", "/J", linkPath, targetPath)
-	// Inherit environment; hide window
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("mklink failed: %v: %s", err, string(out))
@@ -380,7 +395,6 @@ func createJunctionWindows(linkPath, targetPath string) error {
 	return nil
 }
 
-// copyDir recursively links (hardlink) files from src to dst when possible, otherwise copies
 func copyDir(src, dst string) error {
 	info, err := os.Stat(src)
 	if err != nil {
@@ -405,9 +419,7 @@ func copyDir(src, dst string) error {
 			}
 			continue
 		}
-		// Try hardlink first
 		if err := linkFile(sPath, dPath); err != nil {
-			// Fallback to copy
 			if err := copyFile(sPath, dPath); err != nil {
 				return err
 			}
@@ -416,12 +428,10 @@ func copyDir(src, dst string) error {
 	return nil
 }
 
-// linkFile tries to create a hardlink from src to dst
 func linkFile(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return err
 	}
-	// Remove existing destination if any
 	if _, err := os.Lstat(dst); err == nil {
 		_ = os.Remove(dst)
 	}
@@ -449,9 +459,21 @@ func copyFile(src, dst string) error {
 	return nil
 }
 
-// InstallAll installs all dependencies
+func linkDirPreferSymlink(src, dst string) error {
+	_ = os.RemoveAll(dst)
+	if runtime.GOOS == "windows" {
+		if err := createJunctionWindows(dst, src); err == nil {
+			return nil
+		}
+		return copyDir(src, dst)
+	}
+	if err := os.Symlink(src, dst); err == nil {
+		return nil
+	}
+	return copyDir(src, dst)
+}
+
 func (i *Installer) InstallAll(packages map[string]string) error {
-	// parallel install with worker pool
 	type job struct{ name, version string }
 	jobs := make(chan job, len(packages))
 	errs := make(chan error, len(packages))
@@ -489,10 +511,128 @@ func (i *Installer) InstallAll(packages map[string]string) error {
 	return nil
 }
 
-// Clean removes all installed packages
 func (i *Installer) Clean() error {
 	if err := os.RemoveAll(i.nodeModulesPath); err != nil {
 		return fmt.Errorf("failed to clean node_modules: %w", err)
+	}
+	return nil
+}
+
+// InstallPipeline installs packages using two-stage pipeline: download/extract → link
+func (i *Installer) InstallPipeline(pkgs []PackageSpec, downloadWorkers, linkWorkers int) error {
+	if downloadWorkers <= 0 {
+		downloadWorkers = 8
+	}
+	if linkWorkers <= 0 {
+		linkWorkers = 8
+	}
+
+	type linkItem struct{ name, version, casPath string }
+	dlJobs := make(chan PackageSpec, len(pkgs))
+	linkJobs := make(chan linkItem, len(pkgs))
+	errs := make(chan error, len(pkgs))
+
+	var wgDL sync.WaitGroup
+	var wgLink sync.WaitGroup
+
+	// stage 1: download+extract to CAS
+	dlWorker := func() {
+		defer wgDL.Done()
+		for p := range dlJobs {
+			// Ensure CAS path via single-pass pipeline
+			// Fast path: if CAS already has content, skip
+			// Hash requires downloading; we attempt metadata tarball stream
+			stream, err := registry.StreamTarball(p.TarballURL)
+			if err != nil {
+				errs <- fmt.Errorf("failed to stream %s: %w", p.Name, err)
+				continue
+			}
+			h := sha256.New()
+			tee := io.TeeReader(stream, h)
+			tmpDir, err := os.MkdirTemp("", "npgo-extract-*")
+			if err != nil {
+				stream.Close()
+				errs <- err
+				continue
+			}
+			tmpPkg := filepath.Join(tmpDir, "package")
+			if err := extractor.ExtractFromReader(tee, tmpPkg); err != nil {
+				stream.Close()
+				os.RemoveAll(tmpDir)
+				errs <- err
+				continue
+			}
+			stream.Close()
+			hash := hex.EncodeToString(h.Sum(nil))
+			casPath, err := cas.EnsureDirs(hash)
+			if err != nil {
+				os.RemoveAll(tmpDir)
+				errs <- err
+				continue
+			}
+			exists, _ := cas.Exists(hash)
+			if !exists {
+				if err := os.MkdirAll(filepath.Dir(casPath), 0755); err != nil {
+					os.RemoveAll(tmpDir)
+					errs <- err
+					continue
+				}
+				if err := os.Rename(tmpPkg, casPath); err != nil {
+					if err := createTreeLinkOrCopy(tmpPkg, casPath); err != nil {
+						os.RemoveAll(tmpDir)
+						errs <- err
+						continue
+					}
+				}
+			}
+			os.RemoveAll(tmpDir)
+			_, _ = cas.EnsureExtractedCache(hash)
+			linkJobs <- linkItem{name: p.Name, version: p.Version, casPath: casPath}
+		}
+	}
+
+	// stage 2: link to project
+	linkWorker := func() {
+		defer wgLink.Done()
+		for it := range linkJobs {
+			extractPath := cache.GetExtractPath(it.name, it.version)
+			if err := linkDirPreferSymlink(it.casPath, extractPath); err != nil {
+				errs <- err
+				continue
+			}
+			_ = ensureGlobalPackageLink(it.name, extractPath)
+			_ = i.linkPackageBinaries(it.name, extractPath)
+			_ = writeIntegrity(filepath.Join(i.nodeModulesPath, it.name), it.name, it.version, "")
+			// symlink node_modules/<name> → extractPath
+			if err := i.createSymlink(it.name, extractPath); err != nil {
+				errs <- err
+				continue
+			}
+		}
+	}
+
+	for w := 0; w < downloadWorkers; w++ {
+		wgDL.Add(1)
+		go dlWorker()
+	}
+	for w := 0; w < linkWorkers; w++ {
+		wgLink.Add(1)
+		go linkWorker()
+	}
+
+	for _, p := range pkgs {
+		dlJobs <- p
+	}
+	close(dlJobs)
+	wgDL.Wait()
+	close(linkJobs)
+	wgLink.Wait()
+
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }

@@ -1,0 +1,38 @@
+{
+    "name": "npgo-demo",
+    "version": "1.0.0",
+    "description": "Một ứng dụng Node.js demo chạy bằng PM2",
+    "main": "index.js",
+    "scripts": {
+      "start": "pm2 start index.js",
+      "dev": "node index.js",
+      "stop": "pm2 stop all",
+      "restart": "pm2 restart all"
+    },
+    "keywords": [
+      "nodejs",
+      "pm2",
+      "demo",
+      "server"
+    ],
+    "author": "Tên của bạn <email@example.com>",
+    "license": "MIT",
+    "dependencies": {
+      "express": "^4.21.1",
+      "pm2": "^5.3.0"
+    },
+    "devDependencies": {
+      "nodemon": "^3.1.0"
+    },
+    "engines": {
+      "node": ">=18.0.0"
+    },
+    "repository": {
+      "type": "git",
+      "url": "https://github.com/username/npgo-demo.git"
+    },
+    "bugs": {
+      "url": "https://github.com/username/npgo-demo/issues"
+    },
+    "homepage": "https://github.com/username/npgo-demo#readme"
+}

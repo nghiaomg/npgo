@@ -44,7 +44,6 @@ func fetchLatestRelease() (*Release, error) {
 	return &rel, nil
 }
 
-// CheckUpdate prints a notice if a newer version is available
 func CheckUpdate(currentVersion string) (latest string, hasNew bool, err error) {
 	rel, err := fetchLatestRelease()
 	if err != nil {

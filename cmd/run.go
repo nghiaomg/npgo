@@ -40,7 +40,7 @@ func runScript(script string) {
 
 	cmdStr, ok := pkg.Scripts[script]
 	if !ok || strings.TrimSpace(cmdStr) == "" {
-		ui.ErrorMessage(fmt.Errorf("Script '%s' not found in package.json", script))
+		ui.ErrorMessage(fmt.Errorf("script '%s' not found in package.json", script))
 		os.Exit(1)
 	}
 
@@ -93,7 +93,7 @@ func runScript(script string) {
 	execCmd.Stdin = os.Stdin
 
 	if err := execCmd.Run(); err != nil {
-		ui.ErrorMessage(fmt.Errorf("Script \"%s\" failed: %v", script, err))
+		ui.ErrorMessage(fmt.Errorf("script \"%s\" failed: %v", script, err))
 		os.Exit(1)
 	}
 }
